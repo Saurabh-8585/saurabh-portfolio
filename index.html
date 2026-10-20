@@ -1115,6 +1115,56 @@
       margin: 0 auto
     }
 
+    #strands {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0
+    }
+
+    .contact>*:not(#strands) {
+      position: relative;
+      z-index: 1
+    }
+
+    #dusk {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      opacity: 0;
+      mix-blend-mode: multiply;
+      background: linear-gradient(180deg, #5b4fa8 0%, #e9a07a 100%)
+    }
+
+    .sfx-btn {
+      position: fixed;
+      left: 22px;
+      bottom: 18px;
+      z-index: 7000;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+      background: var(--paper);
+      border: 2px solid var(--ink);
+      border-radius: 999px;
+      padding: 6px 12px;
+      cursor: none
+    }
+
+    .sfx-btn b {
+      color: var(--red);
+      font-weight: 500
+    }
+
+    .sfx-btn.on b {
+      color: var(--blue)
+    }
+
     .mega-cta {
       margin-top: 54px;
       display: flex;
@@ -1274,7 +1324,9 @@
   <div class="cursor-ring"></div>
   <div class="cursor-label" id="cursorLabel"></div>
   <canvas id="gl"></canvas>
+  <div id="dusk"></div>
   <canvas id="webTrail"></canvas>
+  <button class="sfx-btn hoverable" id="sfxBtn" type="button" aria-pressed="false">SFX <b>OFF</b></button>
   <div class="halftone"></div>
   <div class="halftone-red"></div>
   <div class="progress"><i id="progFill"></i></div>
@@ -1443,6 +1495,7 @@
 
       <!-- CONTACT -->
       <section id="contact" class="contact">
+        <canvas id="strands"></canvas>
         <div class="eyebrow reveal" style="justify-content:center">04 — Let's Talk</div>
         <h2 class="h2 flip3d">READY TO <span class="accent">DEPLOY?</span></h2>
         <p class="hero-sub reveal" style="opacity:1;margin:26px auto 0;text-align:center">Email me, message me, or
@@ -1493,7 +1546,7 @@
     ============================================================ */
     const canvas = document.getElementById('gl');
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(devicePixelRatio, matchMedia('(max-width:760px)').matches ? 1.5 : 2));
     renderer.setSize(innerWidth, innerHeight);
     renderer.setClearColor(0x000000, 0);
 
@@ -1505,19 +1558,28 @@
     const INK = 0x15151C, RED = 0xE0202F, BLUE = 0x2342D6, YELLOW = 0xE8A800, PAPER = 0xF2EFE6;
 
     /* ---------- CITY SKYLINE (windows texture + ink edges) ---------- */
-    function windowTexture(w, h) {
-      const c = document.createElement('canvas'); c.width = 64; c.height = 128;
-      const x = c.getContext('2d');
+    /* returns the day texture plus a matching "lights on" overlay (only the yellow windows, glowing) */
+    function windowTextures(w, h) {
+      const mk = () => { const c = document.createElement('canvas'); c.width = 64; c.height = 128; return c; };
+      const c = mk(), lc = mk();
+      const x = c.getContext('2d'), lx = lc.getContext('2d');
       x.fillStyle = '#EFEBDE'; x.fillRect(0, 0, 64, 128);
       x.fillStyle = 'rgba(21,21,28,.8)';
       for (let r = 8; r < 124; r += 14)for (let col = 8; col < 60; col += 14) {
         if (Math.random() < .72) x.fillRect(col, r, 7, 8);
-        else { x.fillStyle = 'rgba(255,196,0,.9)'; x.fillRect(col, r, 7, 8); x.fillStyle = 'rgba(21,21,28,.8)'; }
+        else {
+          x.fillStyle = 'rgba(255,196,0,.9)'; x.fillRect(col, r, 7, 8); x.fillStyle = 'rgba(21,21,28,.8)';
+          lx.fillStyle = 'rgba(255,170,0,.45)'; lx.fillRect(col - 2, r - 2, 11, 12);
+          lx.fillStyle = '#FFE066'; lx.fillRect(col, r, 7, 8);
+        }
       }
-      const t = new THREE.CanvasTexture(c);
-      t.repeat.set(Math.max(1, Math.round(w / 1.4)), Math.max(1, Math.round(h / 2.4)));
-      t.wrapS = t.wrapT = THREE.RepeatWrapping;
-      return t;
+      const fit = cv => {
+        const t = new THREE.CanvasTexture(cv);
+        t.repeat.set(Math.max(1, Math.round(w / 1.4)), Math.max(1, Math.round(h / 2.4)));
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        return t;
+      };
+      return { base: fit(c), lights: fit(lc) };
     }
     const city = new THREE.Group();
     const buildingDefs = [
@@ -1528,20 +1590,32 @@
     ];
     const HERO_BIDX = 6, HERO_BH = 12.5;
     let heroBuilding = null;
+    const risers = [], dayMats = [], lightMats = [];
     buildingDefs.forEach((d, i) => {
       const [bx, bw, bh, bz] = d;
+      /* each tower is its own group anchored at ground level so it can grow upward on load */
+      const bg = new THREE.Group();
+      bg.position.set(bx, -4.5, bz);
       const g = new THREE.BoxGeometry(bw, bh, bw);
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ map: windowTexture(bw, bh) }));
-      m.position.set(bx, bh / 2 - 4.5, bz);
-      city.add(m);
+      const tex = windowTextures(bw, bh);
+      const dayMat = new THREE.MeshBasicMaterial({ map: tex.base });
+      const m = new THREE.Mesh(g, dayMat);
+      m.position.y = bh / 2;
+      bg.add(m);
+      const glow = new THREE.Mesh(new THREE.BoxGeometry(bw + .02, bh + .02, bw + .02), new THREE.MeshBasicMaterial({ map: tex.lights, transparent: true, opacity: 0, depthWrite: false }));
+      glow.position.y = bh / 2;
+      bg.add(glow);
+      dayMats.push(dayMat); lightMats.push(glow.material);
       const edges = new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({ color: INK, transparent: true, opacity: .9 }));
-      edges.position.copy(m.position);
-      city.add(edges);
+      edges.position.y = bh / 2;
+      bg.add(edges);
       // rooftop ledge
       const ledge = new THREE.Mesh(new THREE.BoxGeometry(bw + .3, .22, bw + .3), new THREE.MeshBasicMaterial({ color: INK }));
-      ledge.position.set(bx, bh - 4.5 + .11, bz);
-      city.add(ledge);
-      if (i === HERO_BIDX) heroBuilding = m; // foreground right tower = hero's perch
+      ledge.position.y = bh + .11;
+      bg.add(ledge);
+      if (!reduceMotion) bg.scale.y = .001;
+      city.add(bg); risers.push(bg);
+      if (i === HERO_BIDX) heroBuilding = { position: new THREE.Vector3(bx, bh / 2 - 4.5, bz) }; // foreground right tower = hero's perch
     });
     scene.add(city);
 
@@ -1618,6 +1692,8 @@
       moon.add(cr);
     }
     moon.position.set(perch.x + .6, perch.y + 2.6, perch.z - 6.5);
+    const moonBaseY = moon.position.y;
+    const intro = { moon: reduceMotion ? 1 : 0, cluster: reduceMotion ? 1 : 0 }; // faded in by launch()
     scene.add(moon);
 
     /* ---------- THE WEB — long 3D strand that draws on scroll ---------- */
@@ -1691,7 +1767,6 @@
     }, { passive: true });
 
     /* ---------- camera follows the web tip across the city ---------- */
-    const camBase = { x: 0, y: 5, z: 14 };
 
     /* mouse parallax + web sway */
     const mouse = { x: 0, y: 0 };
@@ -1747,19 +1822,246 @@
       gsap.fromTo(hero.rotation, { z: 0 }, { z: -.06, duration: .08, yoyo: true, repeat: 1 });
       comicBurst(e.clientX, e.clientY);
       webSplat(e.clientX, e.clientY);
+      sfx('zap');
     });
+
+    /* ---------- K8S CLUSTER NETWORK — nodes in the sky, packets flow along links ---------- */
+    const LOW_END = matchMedia('(max-width:760px)').matches || (navigator.hardwareConcurrency || 8) <= 4;
+    const NODE_N = LOW_END ? 26 : 54, PACKET_N = LOW_END ? 8 : 16;
+    const nodeBase = [], nodePos = [], nodeLinks = [];
+    for (let i = 0; i < NODE_N; i++) {
+      nodeBase.push(new THREE.Vector3(-36 + Math.random() * 46, 10 + Math.random() * 9, -10 + Math.random() * 7));
+      nodePos.push(new THREE.Vector3());
+      nodeLinks.push([]);
+    }
+    const edgePairs = [], edgeSeen = new Set();
+    nodeBase.forEach((a, i) => {
+      nodeBase.map((b, j) => ({ j, d: i === j ? 1e9 : a.distanceTo(b) })).sort((p, q) => p.d - q.d).slice(0, 3).forEach(({ j }) => {
+        const key = i < j ? i + '-' + j : j + '-' + i;
+        if (edgeSeen.has(key)) return;
+        edgeSeen.add(key); edgePairs.push([i, j]); nodeLinks[i].push(j); nodeLinks[j].push(i);
+      });
+    });
+    const clusterGroup = new THREE.Group();
+    const nodeMesh = new THREE.InstancedMesh(new THREE.OctahedronGeometry(.3), new THREE.MeshBasicMaterial(), NODE_N);
+    const nodeCols = [INK, RED, BLUE, YELLOW];
+    for (let i = 0; i < NODE_N; i++) nodeMesh.setColorAt(i, new THREE.Color(nodeCols[i % 4]));
+    const linkGeo = new THREE.BufferGeometry();
+    const linkArr = new Float32Array(edgePairs.length * 6);
+    linkGeo.setAttribute('position', new THREE.BufferAttribute(linkArr, 3));
+    const linkMat = new THREE.LineBasicMaterial({ color: INK, transparent: true, opacity: 0 });
+    const packetMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(.13, 8, 8), new THREE.MeshBasicMaterial({ color: RED }), PACKET_N);
+    const packets = Array.from({ length: PACKET_N }, () => {
+      const from = Math.floor(Math.random() * NODE_N);
+      return { from, to: nodeLinks[from][0] ?? from, t: Math.random(), sp: .35 + Math.random() * .5 };
+    });
+    clusterGroup.add(nodeMesh, new THREE.LineSegments(linkGeo, linkMat), packetMesh);
+    scene.add(clusterGroup);
+    let lastTick = 0;
+    const dummy = new THREE.Object3D(), ptrWorld = new THREE.Vector3(1e3, 1e3, 0), ptrRay = new THREE.Raycaster();
+    const clusterPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 6.5); // z = -6.5
+    function updateCluster(t, dt) {
+      /* pointer ray → point on the cluster plane, nodes shy away from it */
+      ptrRay.setFromCamera(new THREE.Vector2(mouse.x * 2, -mouse.y * 2), camera);
+      if (!ptrRay.ray.intersectPlane(clusterPlane, ptrWorld)) ptrWorld.set(1e3, 1e3, 0);
+      const k = fx.cluster * intro.cluster;
+      for (let i = 0; i < NODE_N; i++) {
+        const b = nodeBase[i], p = nodePos[i];
+        p.set(b.x + Math.sin(t * .6 + i) * .5, b.y + Math.cos(t * .5 + i * 1.7) * .45, b.z);
+        const dx = p.x - ptrWorld.x, dy = p.y - ptrWorld.y, d = Math.hypot(dx, dy), near = Math.max(0, 1 - d / 5);
+        p.x += dx / (d || 1) * near * 1.4; p.y += dy / (d || 1) * near * 1.4;
+        dummy.position.copy(p);
+        dummy.rotation.set(t * .5 + i, t * .7 + i, 0);
+        dummy.scale.setScalar(Math.max(.001, k * (1 + near * 1.6)));
+        dummy.updateMatrix();
+        nodeMesh.setMatrixAt(i, dummy.matrix);
+      }
+      nodeMesh.instanceMatrix.needsUpdate = true;
+      edgePairs.forEach(([a, b], i) => {
+        nodePos[a].toArray(linkArr, i * 6); nodePos[b].toArray(linkArr, i * 6 + 3);
+      });
+      linkGeo.attributes.position.needsUpdate = true;
+      linkMat.opacity = .5 * k;
+      packets.forEach((pk, i) => {
+        pk.t += dt * pk.sp;
+        if (pk.t >= 1) {
+          const nxt = nodeLinks[pk.to].filter(n => n !== pk.from);
+          pk.from = pk.to; pk.to = nxt.length ? nxt[Math.floor(Math.random() * nxt.length)] : pk.from; pk.t = 0;
+          if (k > .7 && t - lastTick > .4) { lastTick = t; sfx('tick'); }
+        }
+        dummy.position.lerpVectors(nodePos[pk.from], nodePos[pk.to], pk.t);
+        dummy.rotation.set(0, 0, 0);
+        dummy.scale.setScalar(Math.max(.001, k * (1 + Math.sin(pk.t * Math.PI) * .6)));
+        dummy.updateMatrix();
+        packetMesh.setMatrixAt(i, dummy.matrix);
+      });
+      packetMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    /* ---------- SECTION-REACTIVE SCENE (camera lens + roll, skyline tint, cluster glow) ---------- */
+    const fx = { cluster: .35, fov: 55, roll: 0, tint: 0, night: 0 };
+    const edgeMats = [];
+    city.traverse(o => { if (o.isLineSegments) edgeMats.push(o.material); });
+    const tintCols = [new THREE.Color(INK), new THREE.Color(BLUE), new THREE.Color(INK), new THREE.Color(RED)];
+    const SECTION_FX = {
+      '.hero': { cluster: .35, fov: 55, roll: 0, tint: 0, night: 0 },
+      '#about': { cluster: .55, fov: 52, roll: .02, tint: 0, night: .2 },
+      '#work': { cluster: 1, fov: 48, roll: -.025, tint: 1, night: .5 },
+      '#process': { cluster: .8, fov: 58, roll: .02, tint: 2, night: .8 },
+      '#contact': { cluster: 1, fov: 64, roll: 0, tint: 3, night: 1 }
+    };
+    const tmpCol = new THREE.Color(), dayCol = new THREE.Color(0xFFFFFF), duskCol = new THREE.Color(0x8F8AB8);
+    const moonDay = new THREE.Color(0xFFE9A8), moonNight = new THREE.Color(0xFFC27A), duskEl = document.getElementById('dusk');
+    function applyTint() {
+      const i = Math.min(3, Math.floor(fx.tint)), f = fx.tint - i;
+      tmpCol.copy(tintCols[i]).lerp(tintCols[Math.min(3, i + 1)], f);
+      edgeMats.forEach(m => m.color.copy(tmpCol));
+      linkMat.color.copy(tmpCol);
+      /* day → night: towers dim, windows light up, moon sinks and warms, sky tints */
+      tmpCol.copy(dayCol).lerp(duskCol, fx.night * .75);
+      dayMats.forEach(m => m.color.copy(tmpCol));
+      lightMats.forEach(m => m.opacity = Math.min(1, fx.night * 1.4));
+      moonDisc.material.color.copy(moonDay).lerp(moonNight, fx.night);
+      moon.position.y = moonBaseY - fx.night * 2.4;
+      duskEl.style.opacity = (fx.night * .3).toFixed(3);
+    }
+    Object.entries(SECTION_FX).forEach(([sel, to]) => {
+      ScrollTrigger.create({
+        trigger: sel, start: 'top 55%', end: 'bottom 55%',
+        onToggle: self => { if (self.isActive && !reduceMotion) gsap.to(fx, { ...to, duration: 1.4, ease: 'power2.inOut', overwrite: true }); }
+      });
+    });
+
+    /* ---------- POST: comic print pass (halftone in the darks, red/yellow glow, scroll-speed aberration) ---------- */
+    let rt = null, postScene = null, postCam = null, postMat = null;
+    if (!LOW_END) {
+      const sz = renderer.getDrawingBufferSize(new THREE.Vector2());
+      const useMS = renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget;
+      rt = new (useMS ? THREE.WebGLMultisampleRenderTarget : THREE.WebGLRenderTarget)(sz.x, sz.y, { format: THREE.RGBAFormat });
+      postMat = new THREE.ShaderMaterial({
+        uniforms: { tDiffuse: { value: rt.texture }, uRes: { value: sz.clone() }, uVel: { value: 0 } },
+        vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0., 1.); }',
+        fragmentShader: `
+          uniform sampler2D tDiffuse; uniform vec2 uRes; uniform float uVel; varying vec2 vUv;
+          float glowMask(vec4 c){ return clamp((c.r - max(c.g, c.b)) * 2.2, 0., 1.) * c.a; }
+          void main(){
+            vec2 px = 1. / uRes, dir = vUv - .5;
+            float ca = (.0005 + uVel * .006) * length(dir) * 2.;
+            vec4 c = texture2D(tDiffuse, vUv);
+            vec4 cr = texture2D(tDiffuse, vUv + dir * ca), cb = texture2D(tDiffuse, vUv - dir * ca);
+            vec4 p = vec4(cr.r, c.g, cb.b, max(c.a, max(cr.a, cb.a)));
+            /* glow: gather red-ish pixels (web tip, packets, strand) in two rings */
+            vec3 gl = vec3(0.); float ga = 0.;
+            for (int i = 0; i < 8; i++) {
+              float a = float(i) * .7854;
+              vec2 o = vec2(cos(a), sin(a));
+              vec4 s1 = texture2D(tDiffuse, vUv + o * px * 5.), s2 = texture2D(tDiffuse, vUv + o * px * 12.);
+              float m1 = glowMask(s1), m2 = glowMask(s2);
+              gl += s1.rgb * m1 + s2.rgb * m2 * .6; ga += m1 + m2 * .6;
+            }
+            p.rgb += gl * .06; p.a = clamp(p.a + ga * .035, 0., 1.);
+            /* halftone dots print the darks like a comic page */
+            vec3 col = p.a > .001 ? p.rgb / p.a : p.rgb;
+            float lum = dot(col, vec3(.299, .587, .114)), dark = 1. - lum;
+            vec2 g = mat2(.9, -.44, .44, .9) * gl_FragCoord.xy / 5.5, f = fract(g) - .5;
+            float dotm = smoothstep(sqrt(dark) * .55, sqrt(dark) * .55 - .14, length(f));
+            col = mix(col, col * .55, dotm * smoothstep(.35, .85, dark) * .4);
+            gl_FragColor = vec4(col * p.a, p.a);
+          }`,
+        depthTest: false, depthWrite: false
+      });
+      postScene = new THREE.Scene();
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat);
+      quad.frustumCulled = false;
+      postScene.add(quad);
+      postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    }
+    function renderFrame() {
+      if (rt) {
+        renderer.setRenderTarget(rt);
+        renderer.render(scene, camera);
+        renderer.setRenderTarget(null);
+        postMat.uniforms.uVel.value = Math.min(1, Math.abs(webTarget - webProgress) * 25);
+        renderer.render(postScene, postCam);
+      } else renderer.render(scene, camera);
+    }
+
+    /* ---------- SCROLL-DRIVEN CAMERA PATH (hero → through the cluster → street level → wide finale) ---------- */
+    const PATH_CAM = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 5, 14), new THREE.Vector3(-6, 3.5, 12), new THREE.Vector3(-13, 12.5, 0),
+      new THREE.Vector3(-9, -2.4, 7.5), new THREE.Vector3(-20, 6, 15)
+    ]);
+    const PATH_LOOK = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(perch.x - 4.6, perch.y - 2.2, perch.z), new THREE.Vector3(-10, 4, -4), new THREE.Vector3(-20, 15, -8),
+      new THREE.Vector3(-17, 2, -5), new THREE.Vector3(-27, 9, -2)
+    ]);
+    let pathT = [0, .18, .42, .68, 1];
+    function measurePath() {
+      const max = Math.max(1, document.documentElement.scrollHeight - innerHeight);
+      const mid = sel => {
+        const r = document.querySelector(sel).getBoundingClientRect();
+        return Math.min(1, Math.max(0, (r.top + scrollY + r.height / 2 - innerHeight / 2) / max));
+      };
+      const t = [0, mid('#about'), mid('#work'), mid('#process'), 1];
+      if (t.every((v, i) => i === 0 || v > t[i - 1])) pathT = t;
+    }
+    const pathPos = new THREE.Vector3(), pathLook = new THREE.Vector3();
+    function samplePath(p) {
+      let i = 0;
+      while (i < pathT.length - 2 && p > pathT[i + 1]) i++;
+      let s = THREE.MathUtils.clamp((p - pathT[i]) / (pathT[i + 1] - pathT[i]), 0, 1);
+      s = s * s * (3 - 2 * s);
+      const u = (i + s) / (pathT.length - 1);
+      PATH_CAM.getPoint(u, pathPos); PATH_LOOK.getPoint(u, pathLook);
+    }
+    addEventListener('load', () => setTimeout(measurePath, 300));
+    addEventListener('resize', measurePath);
+
+    /* ---------- SFX (off by default; tiny synthesized blips, no audio files) ---------- */
+    let sfxOn = false, actx = null;
+    function sfx(kind) {
+      if (!sfxOn) return;
+      try {
+        actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+        const now = actx.currentTime, g = actx.createGain(), o = actx.createOscillator();
+        o.connect(g); g.connect(actx.destination);
+        if (kind === 'zap') {
+          o.type = 'sawtooth'; o.frequency.setValueAtTime(900, now); o.frequency.exponentialRampToValueAtTime(120, now + .22);
+          g.gain.setValueAtTime(.05, now); g.gain.exponentialRampToValueAtTime(.0001, now + .24); o.start(now); o.stop(now + .25);
+        } else if (kind === 'hover') {
+          o.type = 'sine'; o.frequency.setValueAtTime(520, now); o.frequency.exponentialRampToValueAtTime(820, now + .06);
+          g.gain.setValueAtTime(.02, now); g.gain.exponentialRampToValueAtTime(.0001, now + .08); o.start(now); o.stop(now + .09);
+        } else {
+          o.type = 'square'; o.frequency.setValueAtTime(1500, now);
+          g.gain.setValueAtTime(.008, now); g.gain.exponentialRampToValueAtTime(.0001, now + .04); o.start(now); o.stop(now + .05);
+        }
+      } catch (e) { }
+    }
+    const sfxBtn = document.getElementById('sfxBtn');
+    sfxBtn.addEventListener('click', () => {
+      sfxOn = !sfxOn;
+      sfxBtn.classList.toggle('on', sfxOn);
+      sfxBtn.setAttribute('aria-pressed', sfxOn);
+      sfxBtn.querySelector('b').textContent = sfxOn ? 'ON' : 'OFF';
+      sfx('zap');
+    });
+    document.querySelectorAll('.btn,.nav-links a,.social').forEach(el => el.addEventListener('pointerenter', () => sfx('hover')));
 
     /* ---------- render loop ---------- */
     const clock = new THREE.Clock();
+    let looping = false;
     function tick() {
-      const dt = clock.getDelta(), t = clock.getElapsedTime();
+      const dt = Math.min(clock.getDelta(), .1), t = clock.getElapsedTime();
+      updateCluster(t, dt);
+      applyTint();
+      if (Math.abs(camera.fov - fx.fov) > .01) { camera.fov = fx.fov; camera.updateProjectionMatrix(); }
 
       /* hero idle: breathing + slight head/arm motion */
       hero.position.y = perch.y + Math.sin(t * 1.6) * .04;
       hero.rotation.y = HERO_BASE_ROT + Math.sin(t * .5) * .05 + mouse.x * .15;
       /* moon gently pulses + always faces camera */
       moon.lookAt(camera.position);
-      const mp = 1 + Math.sin(t * 1.2) * .015;
+      const mp = Math.max(.001, (1 + Math.sin(t * 1.2) * .015) * intro.moon);
       moon.scale.set(mp, mp, mp);
 
       /* web extends toward scroll target with smoothing — fires fast on every scroll */
@@ -1795,15 +2097,14 @@
       });
 
       /* camera: starts framing the hero on the right, then follows the web tip left across the city */
-      const followX = THREE.MathUtils.lerp(camBase.x, tp.x * .55, webProgress);
-      const followY = THREE.MathUtils.lerp(camBase.y, 2.5 + tp.y * .35, webProgress);
-      const followZ = THREE.MathUtils.lerp(camBase.z, 15.5, webProgress);
-      camera.position.x += ((followX + mouse.x * 1.6) - camera.position.x) * .05;
-      camera.position.y += ((followY - mouse.y * 1.0) - camera.position.y) * .05;
-      camera.position.z += (followZ - camera.position.z) * .05;
-      const lookStart = new THREE.Vector3(perch.x - 4.6, perch.y - 2.2, perch.z); // hero sits right-of-center
-      const look = new THREE.Vector3().lerpVectors(lookStart, tp, Math.min(1, webProgress * 1.25 + .05));
+      samplePath(webProgress);
+      const hand = reduceMotion ? 0 : 1; // gentle handheld drift
+      camera.position.x += ((pathPos.x + mouse.x * 1.6 + Math.sin(t * .7) * .18 * hand) - camera.position.x) * .05;
+      camera.position.y += ((pathPos.y - mouse.y * 1.0 + Math.sin(t * .9 + 1) * .12 * hand) - camera.position.y) * .05;
+      camera.position.z += (pathPos.z - camera.position.z) * .05;
+      const look = pathLook.lerp(tp, webProgress < .05 ? 0 : .12);// glance toward the web tip once it's flying
       camera.lookAt(look);
+      camera.rotateZ(fx.roll);
 
       /* clouds drift */
       clouds.children.forEach(c => { c.position.x += c.userData.sp * dt; if (c.position.x > 22) c.position.x = -22; });
@@ -1821,10 +2122,15 @@
         }
       }
 
-      renderer.render(scene, camera);
-      if (!reduceMotion) requestAnimationFrame(tick);
+      renderFrame();
+      if (!reduceMotion && !document.hidden) requestAnimationFrame(tick); else looping = false;
     }
-    addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+    function startLoop() { if (looping) return; looping = true; clock.getDelta(); tick(); }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && !reduceMotion) startLoop(); });
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+      if (rt) { const s = renderer.getDrawingBufferSize(new THREE.Vector2()); rt.setSize(s.x, s.y); postMat.uniforms.uRes.value.copy(s); }
+    });
 
     /* ============================================================
        CURSOR WEB TRAIL (2D)
@@ -1868,8 +2174,16 @@
 
     function launch() {
       document.getElementById('loader').classList.add('done');
-      tick();
-      if (reduceMotion) { renderer.render(scene, camera); return; }
+      looping = true; tick();
+      if (reduceMotion) { renderFrame(); return; }
+      /* "terraform apply": towers grow out of the ground left → right, then the hero, moon and cluster come online */
+      hero.scale.setScalar(.001);
+      const sorted = [...risers].sort((a, b) => a.position.x - b.position.x);
+      gsap.to(sorted.map(b => b.scale), { y: 1, duration: 1, stagger: .12, ease: 'back.out(1.3)', delay: .15 });
+      gsap.to(hero.scale, { x: 2.2, y: 2.2, z: 2.2, duration: .9, ease: 'back.out(2.2)', delay: 1.6 });
+      gsap.to(intro, { moon: 1, duration: 1.1, ease: 'back.out(1.6)', delay: 1.3 });
+      gsap.to(intro, { cluster: 1, duration: 1.8, ease: 'power2.out', delay: 1.9 });
+      setTimeout(measurePath, 800);
       const tl = gsap.timeline({ defaults: { ease: 'power4.out' } });
       tl.to('.hero h1 .row span', { y: 0, rotateX: 0, duration: 1.4, stagger: .15, ease: 'back.out(1.4)' }, .2)
         .to('.hero-tag', { opacity: 1, duration: 1 }, .5)
@@ -1986,6 +2300,81 @@
       });
       card.addEventListener('pointerleave', () => gsap.to(card, { rotateX: 0, rotateY: 0, duration: .8, ease: 'elastic.out(1,.5)' }));
     });
+
+    /* ============================================================
+       CONTACT STRANDS — verlet web threads from the section edges to your cursor
+    ============================================================ */
+    (function () {
+      const sec = document.getElementById('contact'), cv = document.getElementById('strands'), cx = cv.getContext('2d');
+      if (reduceMotion || matchMedia('(hover:none)').matches) { cv.remove(); return; }
+      const N = 16, M = 10;
+      let W = 0, H = 0, visible = false, inside = false;
+      const ptr = { x: 0, y: 0 }, hub = { x: 0, y: 0 };
+      let strands = [];
+      function build() {
+        const r = sec.getBoundingClientRect(), dpr = Math.min(devicePixelRatio, 2);
+        W = r.width; H = r.height;
+        cv.width = W * dpr; cv.height = H * dpr; cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        hub.x = ptr.x = W / 2; hub.y = ptr.y = H * .45;
+        strands = Array.from({ length: N }, (_, i) => {
+          const f = i / N * 4, side = Math.floor(f), t = f - side;
+          const a = [{ x: t * W, y: 0 }, { x: W, y: t * H }, { x: W - t * W, y: H }, { x: 0, y: H - t * H }][side];
+          const len = Math.hypot(hub.x - a.x, hub.y - a.y) / M * 1.12;
+          const pts = Array.from({ length: M + 1 }, (_, k) => {
+            const x = a.x + (hub.x - a.x) * k / M, y = a.y + (hub.y - a.y) * k / M;
+            return { x, y, px: x, py: y };
+          });
+          return { a, len, pts };
+        });
+      }
+      build(); addEventListener('resize', build);
+      new IntersectionObserver(es => { visible = es[0].isIntersecting; if (visible) build(); }).observe(sec);
+      addEventListener('pointermove', e => {
+        const r = sec.getBoundingClientRect();
+        ptr.x = e.clientX - r.left; ptr.y = e.clientY - r.top;
+        inside = ptr.x >= 0 && ptr.x <= r.width && ptr.y >= 0 && ptr.y <= r.height;
+      });
+      function frame() {
+        requestAnimationFrame(frame);
+        if (!visible || document.hidden) return;
+        const tx = inside ? ptr.x : W / 2, ty = inside ? ptr.y : H * .45;
+        hub.x += (tx - hub.x) * .12; hub.y += (ty - hub.y) * .12;
+        cx.clearRect(0, 0, W, H);
+        strands.forEach(s => {
+          const p = s.pts;
+          for (let k = 1; k < M; k++) { // verlet step with a little gravity
+            const q = p[k], vx = (q.x - q.px) * .96, vy = (q.y - q.py) * .96;
+            q.px = q.x; q.py = q.y; q.x += vx; q.y += vy + .22;
+          }
+          p[0].x = s.a.x; p[0].y = s.a.y; p[M].x = hub.x; p[M].y = hub.y;
+          for (let it = 0; it < 4; it++) {
+            for (let k = 0; k < M; k++) {
+              const A = p[k], B = p[k + 1], dx = B.x - A.x, dy = B.y - A.y, d = Math.hypot(dx, dy) || 1, diff = (d - s.len) / d * .5;
+              if (d <= s.len) continue; // threads can go slack, never stretch
+              const ax = dx * diff, ay = dy * diff;
+              if (k > 0) { A.x += ax; A.y += ay; }
+              if (k < M - 1) { B.x -= ax; B.y -= ay; }
+            }
+          }
+        });
+        cx.lineCap = 'round';
+        cx.strokeStyle = 'rgba(21,21,28,.55)'; cx.lineWidth = 1.4;
+        strands.forEach(s => {
+          cx.beginPath(); cx.moveTo(s.pts[0].x, s.pts[0].y);
+          for (let k = 1; k < M; k++) { const m = s.pts[k], n = s.pts[k + 1]; cx.quadraticCurveTo(m.x, m.y, (m.x + n.x) / 2, (m.y + n.y) / 2); }
+          cx.lineTo(hub.x, hub.y); cx.stroke();
+        });
+        cx.strokeStyle = 'rgba(21,21,28,.3)'; cx.lineWidth = 1; // spiral rungs between neighbouring threads
+        [3, 5, 7, 9].forEach(k => {
+          cx.beginPath();
+          strands.forEach((s, i) => { const q = s.pts[k]; i ? cx.lineTo(q.x, q.y) : cx.moveTo(q.x, q.y); });
+          cx.closePath(); cx.stroke();
+        });
+        cx.fillStyle = '#E0202F'; cx.beginPath(); cx.arc(hub.x, hub.y, 5, 0, 7); cx.fill();
+        cx.strokeStyle = '#15151C'; cx.lineWidth = 2; cx.stroke();
+      }
+      frame();
+    })();
   </script>
 </body>
 
